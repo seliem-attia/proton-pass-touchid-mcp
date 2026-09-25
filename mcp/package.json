@@ -1,6 +1,6 @@
 {
   "name": "proton-pass-touchid-mcp",
-  "version": "2.1.0",
+  "version": "2.2.0",
   "private": true,
   "type": "module",
   "description": "MCP server for Proton Pass with Touch ID approval per secret: gives Claude, Cursor and other AI agents audited, biometric-gated access to pass-cli on macOS",
@@ -24,11 +24,18 @@
     "password-manager",
     "ai-agents"
   ],
-  "os": ["darwin"],
-  "engines": { "node": ">=18" },
-  "bin": { "proton-pass-touchid-mcp": "index.mjs" },
+  "os": [
+    "darwin"
+  ],
+  "engines": {
+    "node": ">=18"
+  },
+  "bin": {
+    "proton-pass-touchid-mcp": "index.mjs"
+  },
   "scripts": {
     "start": "node index.mjs",
+    "test": "node --test test/",
     "smoke": "node smoke-test.mjs"
   },
   "dependencies": {

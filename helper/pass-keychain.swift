@@ -5,8 +5,8 @@
 //   pass-keychain delete <service> <account>
 //   pass-keychain auth   ["prompt reason"]                     # pure Touch ID gate, exit 0 on success
 //
-// Items are stored with kSecAttrAccessibleWhenUnlockedThisDeviceOnly (device-bound,
-// never iCloud-synced). IMPORTANT: Touch ID is enforced IN THIS PROCESS (requireTouchID
+// Items are stored in the login keychain (never iCloud-synced). Note: the
+// kSecAttrAccessible* attribute has no effect in the file-based login keychain. IMPORTANT: Touch ID is enforced IN THIS PROCESS (requireTouchID
 // before every read), NOT by a keychain ACL. A real .userPresence ACL (SecAccessControl)
 // needs the data-protection keychain and therefore an Apple Developer certificate with
 // entitlements. Direct access via `security find-generic-password` therefore bypasses
@@ -27,17 +27,22 @@ let args = CommandLine.arguments
 guard args.count >= 2 else { die("usage: pass-keychain <store|read|delete|auth> ...", 64) }
 let cmd = args[1]
 
-// Touch ID with device-passcode fallback (.deviceOwnerAuthentication) so a failing
-// sensor can never lock you out. Returns true on success.
+// Default: Touch ID with fallback to the login password / Apple Watch
+// (.deviceOwnerAuthentication), so a failing sensor can never lock you out.
+// PASS_KEYCHAIN_BIOMETRY_ONLY=1 requires the fingerprint itself (no password fallback).
+let policy: LAPolicy = ProcessInfo.processInfo.environment["PASS_KEYCHAIN_BIOMETRY_ONLY"] == "1"
+    ? .deviceOwnerAuthenticationWithBiometrics
+    : .deviceOwnerAuthentication
+
 func evaluateOwner(_ reason: String) -> Bool {
     let ctx = LAContext()
     ctx.localizedCancelTitle = "Cancel"
     var e: NSError?
-    guard ctx.canEvaluatePolicy(.deviceOwnerAuthentication, error: &e) else {
+    guard ctx.canEvaluatePolicy(policy, error: &e) else {
         die("Authentication unavailable: \(e?.localizedDescription ?? "?")", 2)
     }
     let sem = DispatchSemaphore(value: 0); var ok = false
-    ctx.evaluatePolicy(.deviceOwnerAuthentication, localizedReason: reason) { s, _ in ok = s; sem.signal() }
+    ctx.evaluatePolicy(policy, localizedReason: reason) { s, _ in ok = s; sem.signal() }
     sem.wait()
     return ok
 }

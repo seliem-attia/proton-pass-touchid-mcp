@@ -7,9 +7,10 @@ set -euo pipefail
 BASE="${PASS_AGENT_HOME:-$HOME/.config/proton-pass-agent}"
 SERVICE="${PASS_AGENT_KEYCHAIN_SERVICE:-proton-pass-agent}"
 PASS_CLI="${PASS_CLI_BIN:-$(command -v pass-cli || echo /opt/homebrew/bin/pass-cli)}"
-KEY="$("$BASE/pass-keychain" read "$SERVICE" encryption-key "pass-cli (terminal): $*")"
-exec env \
-  PROTON_PASS_KEY_PROVIDER=env \
-  PROTON_PASS_ENCRYPTION_KEY="$KEY" \
-  PROTON_PASS_SESSION_DIR="${PASS_AGENT_SESSION_DIR:-$BASE/session}" \
-  "$PASS_CLI" "$@"
+# The key is exported (not passed as an argument to env(1)), so it never shows up in `ps`.
+# Don't put secrets into passx arguments: they appear in the Touch ID dialog text.
+PROTON_PASS_ENCRYPTION_KEY="$("$BASE/pass-keychain" read "$SERVICE" encryption-key "pass-cli (terminal): $*")"
+export PROTON_PASS_ENCRYPTION_KEY
+export PROTON_PASS_KEY_PROVIDER=env
+export PROTON_PASS_SESSION_DIR="${PASS_AGENT_SESSION_DIR:-$BASE/session}"
+exec "$PASS_CLI" "$@"

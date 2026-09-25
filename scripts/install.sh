@@ -32,7 +32,7 @@ chmod 755 "$TARGET/passx"
 
 say "Building Touch ID keychain helper"
 swiftc -O "$REPO/helper/pass-keychain.swift" -o "$TARGET/pass-keychain"
-codesign --force --sign - "$TARGET/pass-keychain" >/dev/null 2>&1
+codesign --force --sign - "$TARGET/pass-keychain" >/dev/null 2>&1 || fail "codesign of the helper failed"
 chmod 755 "$TARGET/pass-keychain"
 
 has_item() { security find-generic-password -s "$SERVICE" -a "$1" >/dev/null 2>&1; }
