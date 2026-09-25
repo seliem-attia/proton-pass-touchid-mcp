@@ -1,0 +1,11 @@
+{
+  "mcpServers": {
+    "proton-pass": {
+      "command": "node",
+      "args": ["/Users/YOUR_USER/.config/proton-pass-agent/mcp/index.mjs"],
+      "env": {
+        "PASS_AGENT_NAME": "Claude Code"
+      }
+    }
+  }
+}

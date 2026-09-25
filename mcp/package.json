@@ -1,0 +1,38 @@
+{
+  "name": "proton-pass-touchid-mcp",
+  "version": "2.1.0",
+  "private": true,
+  "type": "module",
+  "description": "MCP server for Proton Pass with Touch ID approval per secret: gives Claude, Cursor and other AI agents audited, biometric-gated access to pass-cli on macOS",
+  "license": "MIT",
+  "author": "Seliem Attia",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/seliem-attia/proton-pass-touchid-mcp.git"
+  },
+  "keywords": [
+    "mcp",
+    "mcp-server",
+    "model-context-protocol",
+    "proton-pass",
+    "pass-cli",
+    "touch-id",
+    "macos-keychain",
+    "claude",
+    "claude-code",
+    "secrets-management",
+    "password-manager",
+    "ai-agents"
+  ],
+  "os": ["darwin"],
+  "engines": { "node": ">=18" },
+  "bin": { "proton-pass-touchid-mcp": "index.mjs" },
+  "scripts": {
+    "start": "node index.mjs",
+    "smoke": "node smoke-test.mjs"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.12.0",
+    "zod": "^3.23.8"
+  }
+}

@@ -1,0 +1,30 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Install dependencies
+        working-directory: mcp
+        run: npm ci --omit=dev
+      - name: Syntax check MCP server
+        run: node --check mcp/index.mjs && node --check mcp/smoke-test.mjs
+      - name: Audit dependencies
+        working-directory: mcp
+        run: npm audit --omit=dev --audit-level=high
+      - name: Build Swift helper
+        run: swiftc -O helper/pass-keychain.swift -o /tmp/pass-keychain
+      - name: Check shell scripts
+        run: bash -n scripts/install.sh && bash -n bin/passx

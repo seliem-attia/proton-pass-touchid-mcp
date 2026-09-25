@@ -1,0 +1,10 @@
+node_modules/
+session/
+# compiled helper
+pass-keychain
+# rendered secrets
+.env
+.env.*
+!*.tpl
+*.bak*
+.DS_Store
