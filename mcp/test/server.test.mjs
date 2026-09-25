@@ -2,7 +2,7 @@
 // Run: npm test   (no Proton account, keychain or Touch ID needed)
 import { test, beforeEach, afterEach } from "node:test";
 import assert from "node:assert/strict";
-import { chmodSync, existsSync, mkdtempSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import os from "node:os";
 import path from "node:path";
@@ -123,16 +123,23 @@ test("errors never echo pass-cli stdout", async () => {
 
 test("field names without values", async () => {
   const r = await call("pass_item_fields", { reason: "names", item: "GitHub" });
-  assert.doesNotMatch(r.text, /SECRET_/);
+  assert.doesNotMatch(r.text, /SECRET_|SEED|otpauth/);
   assert.match(r.text, /api_key/);
+  assert.match(r.text, /totp \(codes via pass_get_totp\)/);
+  const sec = await call("pass_item_fields", { reason: "names", item: "Sections" });
+  assert.match(sec.text, /Prod\.token/);
+  assert.doesNotMatch(sec.text, /SECRET_/);
 });
 
 test("TOTP: seed field refused, only numeric codes returned", async () => {
   const s = await call("pass_get_item", { reason: "login", item: "OTP", field: "totp" });
   assert.equal(s.isError, true);
+  const u = await call("pass_get_item", { reason: "login", item: "OTP", field: "Totp_URI" });
+  assert.equal(u.isError, true);
   const r = await call("pass_get_totp", { reason: "login", item: "OTP" });
+  assert.equal(r.isError, false, r.text);
   const { tokens } = JSON.parse(r.text);
-  assert.deepEqual(tokens, { totp: "123456" });
+  assert.deepEqual(tokens, { totp: "123456", totp_uri: "123456" });
   assert.doesNotMatch(r.text, /otpauth|SEED/);
 });
 
@@ -196,4 +203,93 @@ test("inject refuses unknown or ambiguous references before any tap", async () =
   const r = await call("pass_inject", { reason: "render env", inFile: tpl, outFile: path.join(dir, "x.env") });
   assert.equal(r.isError, true);
   assert.equal(authPrompts().length, 0);
+});
+
+test("whole-item reads are refused (they would include TOTP seeds)", async () => {
+  const r = await call("pass_get_item", { reason: "deploy", item: "GitHub" });
+  assert.equal(r.isError, true);
+  assert.equal(authPrompts().length, 0);
+});
+
+test("pass:// query strings are refused (?totp=uri returns the seed)", async () => {
+  const r = await call("pass_get_item", { reason: "deploy", uri: "pass://S1/I5/totp?totp=uri" });
+  assert.equal(r.isError, true);
+  const tpl = path.join(dir, "q.tpl");
+  writeFileSync(tpl, "X={{ pass://S1/I1/password?totp=uri }}\n");
+  const t = await call("pass_inject", { reason: "render env", inFile: tpl, outFile: path.join(dir, "q.env") });
+  assert.equal(t.isError, true);
+  assert.equal(authPrompts().length, 0);
+});
+
+test("inject: references hidden with Unicode whitespace (NEL) are refused", async () => {
+  const tpl = path.join(dir, "nel.tpl"), out = path.join(dir, "nel.env");
+  writeFileSync(tpl, "A={{ pass://AI Secrets/GitHub/password }}\nB={{\u0085pass://Other/Prod DB/password}}\nC={{\u00a0pass://Other/Prod DB/password\u2003}}\n");
+  const r = await call("pass_inject", { reason: "render env", inFile: tpl, outFile: out });
+  if (!r.isError) {
+    // If accepted, the dialog must have listed every secret that was rendered.
+    const [p] = authPrompts();
+    assert.match(p.reason, /Prod DB/);
+  } else {
+    assert.equal(existsSync(out), false);
+  }
+  for (const c of lines("calls.jsonl").filter((c) => c.args[0] === "inject")) {
+    const tplArg = c.args[c.args.indexOf("-i") + 1];
+    assert.ok(!existsSync(tplArg) || !/Other\/Prod/.test(readFileSync(tplArg, "utf8")));
+  }
+});
+
+test("inject: plain NEL-hidden reference alone is never rendered unseen", async () => {
+  const tpl = path.join(dir, "nel2.tpl"), out = path.join(dir, "nel2.env");
+  writeFileSync(tpl, "A={{ pass://AI Secrets/GitHub/password }}\nB={{\u0085pass://Other/Prod DB/password\u0085}}\n");
+  const r = await call("pass_inject", { reason: "render env", inFile: tpl, outFile: out });
+  const rendered = existsSync(out) ? readFileSync(out, "utf8") : "";
+  const dialog = authPrompts().map((p) => p.reason).join("\n");
+  if (/SECRET_I9/.test(rendered)) assert.match(dialog, /Prod DB/, "rendered a secret the dialog did not show");
+  assert.ok(r.isError || /Prod DB/.test(dialog));
+});
+
+test("inject: more than 10 secrets are refused, so the dialog can list all", async () => {
+  const tpl = path.join(dir, "many.tpl");
+  writeFileSync(tpl, Array.from({ length: 11 }, (_, i) => `K${i}={{ pass://AI Secrets/GitHub/f${i} }}`).join("\n"));
+  const r = await call("pass_inject", { reason: "render env", inFile: tpl, outFile: path.join(dir, "many.env") });
+  assert.equal(r.isError, true);
+  assert.match(r.text, /max 10/);
+  assert.equal(authPrompts().length, 0);
+});
+
+test("inject: vault allowlist also applies to template references", async () => {
+  await client.close();
+  await start({ PASS_AGENT_ALLOWED_VAULTS: "AI Secrets" });
+  const tpl = path.join(dir, "al.tpl");
+  writeFileSync(tpl, "X={{ pass://Other/Prod DB/password }}\n");
+  const r = await call("pass_inject", { reason: "render env", inFile: tpl, outFile: path.join(dir, "al.env") });
+  assert.equal(r.isError, true);
+  assert.equal(authPrompts().length, 0);
+});
+
+test("inject: dialog shows the real target directory behind a symlinked parent", async () => {
+  const realDir = path.join(dir, "real"), linkDir = path.join(dir, "linked");
+  mkdirSync(realDir);
+  symlinkSync(realDir, linkDir);
+  const tpl = path.join(dir, "p.tpl");
+  writeFileSync(tpl, "X={{ pass://AI Secrets/GitHub/password }}\n");
+  const r = await call("pass_inject", { reason: "render env", inFile: tpl, outFile: path.join(linkDir, "x.env") });
+  assert.equal(r.isError, false, r.text);
+  const [p] = authPrompts();
+  assert.match(p.reason, new RegExp(`Target: .*${path.basename(realDir)}/x\\.env`));
+  assert.equal(readFileSync(path.join(realDir, "x.env"), "utf8"), "X=SECRET_I1_password\n");
+});
+
+test("re-login after a server-side session invalidation", async () => {
+  writeFileSync(path.join(dir, "invalidate-once"), "");
+  const r = await call("pass_list_vaults");
+  assert.equal(r.isError, false, r.text);
+  const cmds = lines("calls.jsonl").map((c) => c.args[0]);
+  assert.ok(cmds.includes("login"));
+  assert.ok(prompts().some((p) => p.account === "pat"));
+});
+
+test("unknown pass-cli errors are reported generically", async () => {
+  const r = await call("pass_get_item", { reason: "deploy", item: "Broken", field: "password" });
+  assert.match(r.text, /pass-cli failed \(exit 1\)/);
 });

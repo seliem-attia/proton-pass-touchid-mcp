@@ -22,7 +22,7 @@ import { z } from "zod";
 import { execFile } from "node:child_process";
 import { createHash, randomBytes } from "node:crypto";
 import { existsSync } from "node:fs";
-import { chmod, lstat, mkdtemp, readFile, rename, rm, stat, writeFile } from "node:fs/promises";
+import { chmod, link, lstat, mkdtemp, readFile, realpath, rename, rm, stat, unlink, writeFile } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
 import os from "node:os";
 import path from "node:path";
@@ -34,7 +34,7 @@ const HOME = process.env.PASS_AGENT_HOME
 const SESSION_DIR = process.env.PASS_AGENT_SESSION_DIR || path.join(HOME, "session");
 const KC_BIN = process.env.PASS_KEYCHAIN_BIN || path.join(HOME, "pass-keychain");
 const PASS_CLI = process.env.PASS_CLI_BIN
-  || ["/opt/homebrew/bin/pass-cli", "/usr/local/bin/pass-cli"].find(existsSync)
+  || ["/opt/homebrew/bin/pass-cli", "/usr/local/bin/pass-cli", path.join(os.homedir(), ".local/bin/pass-cli")].find(existsSync)
   || "pass-cli";
 const KC_SERVICE = process.env.PASS_AGENT_KEYCHAIN_SERVICE || "proton-pass-agent";
 const AGENT_NAME = process.env.PASS_AGENT_NAME || "";
@@ -44,7 +44,7 @@ const ALLOWED_VAULTS = (process.env.PASS_AGENT_ALLOWED_VAULTS || "").split(",").
 const CLI_TIMEOUT_MS = 60_000;          // pass-cli call
 const AUTH_TIMEOUT_MS = 120_000;        // user has this long to answer a Touch ID dialog
 const MAX_TEMPLATE_BYTES = 256 * 1024;
-const MAX_TEMPLATE_REFS = 50;
+const MAX_TEMPLATE_SECRETS = 10;       // all of them must fit into the Touch ID dialog
 
 const exec = (file, args, opts = {}) =>
   new Promise((resolve) => {
@@ -73,11 +73,13 @@ const clean = (s, n = 80) => {
   return t.length > n ? t.slice(0, n - 1) + "…" : t;
 };
 const stripAnsi = (s) => s.replace(/\u001b\[[0-9;]*[A-Za-z]/g, "");
-// Error text for the agent: stderr only (never stdout, which may carry secret values).
+// Error text for the agent: never stdout (may carry secret values), and stderr only when
+// it matches a known, value-free message class. Everything else becomes a generic error.
+const SAFE_ERROR = /(not found|does not exist|no such|ambiguous|authenticat|session|logged out|not allowed|permission|forbidden|access denied|invalid (secret )?reference|invalid (item|share|vault)|not a totp field|no totp fields|network|connection|timed out|rate limit)/i;
 const cliError = (r) => {
   if (r.timedOut) return "pass-cli timed out";
-  const msg = stripAnsi(r.stderr).split("\n").map((l) => l.trim()).filter(Boolean).pop();
-  return clean(msg || `pass-cli exit ${r.code}`, 300);
+  const msg = stripAnsi(r.stderr).split("\n").map((l) => l.trim()).filter(Boolean).pop() || "";
+  return SAFE_ERROR.test(msg) ? clean(msg, 300) : `pass-cli failed (exit ${r.code})`;
 };
 
 // ---- Session state (process lifetime) ---------------------------------------
@@ -110,6 +112,8 @@ function baseEnv(extra = {}) {
   return {
     ...baseEnvNoKey(),
     NO_COLOR: "1",
+    PROTON_PASS_NO_UPDATE_CHECK: "1",    // no network update check on every call
+    PROTON_PASS_DISABLE_TELEMETRY: "1",
     PROTON_PASS_KEY_PROVIDER: "env",
     PROTON_PASS_ENCRYPTION_KEY: sessionKey,
     PROTON_PASS_SESSION_DIR: SESSION_DIR,
@@ -129,6 +133,7 @@ function looksLikeAuthError(r) {
       s.includes("session expired") ||
       s.includes("non-existent session") ||
       s.includes("failed to authenticate") ||
+      s.includes("session has been invalidated") ||
       s.includes("unauthorized"))
   );
 }
@@ -152,16 +157,19 @@ function parseJson(raw) {
 }
 
 // ---- Metadata (never contains secret values) -----------------------------------
+// Listings are cached for the duration of ONE tool call (reset in tool()).
+let listCache = new Map();
+const cached = async (key, fn) => { if (!listCache.has(key)) listCache.set(key, await fn()); return listCache.get(key); };
 // Output is projected onto an explicit whitelist, independent of what pass-cli prints.
 async function listVaults() {
-  const j = parseJson(await runPass(["vault", "list", "--output", "json"]));
+  const j = parseJson(await cached("vaults", () => runPass(["vault", "list", "--output", "json"])));
   const vaults = (Array.isArray(j) ? j : j.vaults || []).map((v) => ({
     name: String(v.name ?? ""), share_id: String(v.share_id ?? ""), vault_id: String(v.vault_id ?? ""),
   }));
   return ALLOWED_VAULTS.length ? vaults.filter((v) => ALLOWED_VAULTS.includes(v.name) || ALLOWED_VAULTS.includes(v.share_id)) : vaults;
 }
 async function listItems(shareId) {
-  const j = parseJson(await runPass(["item", "list", `--share-id=${shareId}`, "--output", "json"]));
+  const j = parseJson(await cached(`items:${shareId}`, () => runPass(["item", "list", `--share-id=${shareId}`, "--output", "json"])));
   return (Array.isArray(j) ? j : j.items || []).map((i) => ({
     id: String(i.id ?? ""), share_id: String(i.share_id ?? shareId), title: String(i.title ?? ""),
     item_type: String(i.item_type ?? ""), state: String(i.state ?? ""),
@@ -194,14 +202,15 @@ async function resolveItem(vaultSel, itemSel) {
 function parseRef(uri) {
   const s = String(uri).trim();
   if (!s.startsWith("pass://")) throw new Error("A reference must start with pass://");
-  const [body, query = ""] = s.slice("pass://".length).split(/\?(.*)/s, 2);
-  if (query && !/^[A-Za-z0-9_=&-]+$/.test(query)) throw new Error("Unsupported query in pass:// reference");
+  const body = s.slice("pass://".length);
+  // Queries such as ?totp=uri would make pass-cli return the TOTP seed: not supported.
+  if (body.includes("?")) throw new Error("Query parameters in pass:// references are not supported");
   let segs;
   try { segs = body.split("/").map((p) => decodeURIComponent(p)); } catch { throw new Error("Malformed URL-encoding in pass:// reference"); }
   const [vault, item, ...rest] = segs;
   if (!vault || !item) throw new Error("Expected pass://VAULT/ITEM[/FIELD]");
   const field = rest.filter(Boolean).join("/") || null;
-  return { vault, item, field, query };
+  return { vault, item, field };
 }
 const encodeField = (f) => f.split("/").map(encodeURIComponent).join("/");
 
@@ -266,7 +275,10 @@ function tool(name, description, inputSchema, handler) {
   server.registerTool(
     name,
     { title: ANNOTATIONS[name].title, description, inputSchema, annotations: ANNOTATIONS[name] },
-    (args) => exclusive(async () => { try { return await handler(args ?? {}); } catch (e) { return fail(e); } })
+    (args) => exclusive(async () => {
+      listCache = new Map();
+      try { return await handler(args ?? {}); } catch (e) { return fail(e); } finally { listCache = new Map(); }
+    })
   );
 }
 
@@ -325,22 +337,34 @@ tool(
       }
       // Extract structure only — no string value from the item leaves this function.
       const found = { standard: new Set(), custom: [] };
-      const STANDARD = new Set(["username", "password", "totp", "email", "note", "url", "urls"]);
+      // Field names pass-cli understands (pass-domain field.rs); "title" is metadata, not a field.
+      const STANDARD = new Set(["address", "birthdate", "card_type", "cardholder_name", "city", "company", "country",
+        "country_or_region", "cvv", "email", "expiration_date", "first_name", "full_name", "gender", "job_title",
+        "last_name", "license_number", "middle_name", "note", "number", "organization", "passport_number", "password",
+        "phone_number", "pin", "postal_code", "region", "social_security_number", "ssid", "state_or_province",
+        "totp_uri", "urls", "username", "verification_number", "website", "zip_or_postal_code"]);
+      const nonEmpty = (v) => (typeof v === "string" && v.length > 0) || (Array.isArray(v) && v.length > 0);
       (function walk(node, depth) {
         if (depth > 12 || node == null) return;
         if (Array.isArray(node)) { for (const n of node) walk(n, depth + 1); return; }
         if (typeof node !== "object") return;
+        const typeOf = (f) => (f.content && typeof f.content === "object" ? Object.keys(f.content)[0] : undefined);
         if (Array.isArray(node.extra_fields)) {
           for (const f of node.extra_fields) {
+            if (f && typeof f.name === "string") found.custom.push(typeOf(f) ? `${f.name} (${typeOf(f)})` : f.name);
+          }
+        }
+        if (typeof node.section_name === "string" && Array.isArray(node.section_fields)) {
+          for (const f of node.section_fields) {
             if (f && typeof f.name === "string") {
-              const type = f.content && typeof f.content === "object" ? Object.keys(f.content)[0] : undefined;
-              found.custom.push(type ? `${f.name} (${type})` : f.name);
+              const n = `${node.section_name}.${f.name}`;
+              found.custom.push(typeOf(f) ? `${n} (${typeOf(f)})` : n);
             }
           }
         }
         for (const [k, v] of Object.entries(node)) {
-          if (k === "extra_fields") continue;
-          if (STANDARD.has(k) && ((typeof v === "string" && v.length > 0) || (Array.isArray(v) && v.length > 0))) found.standard.add(k);
+          if (k === "extra_fields" || k === "section_fields") continue;
+          if (STANDARD.has(k) && nonEmpty(v)) found.standard.add(k === "totp_uri" ? "totp (codes via pass_get_totp)" : k);
           walk(v, depth + 1);
         }
       })(parsed, 0);
@@ -359,16 +383,18 @@ tool(
     vault: zName.optional().describe("Vault name or share ID"),
     item: zName.optional().describe("Item title or item ID"),
     uri: z.string().max(1000).optional().describe("Alternative: pass://VAULT/ITEM[/FIELD] (names or IDs)"),
-    field: z.string().min(1).max(200).optional().describe("Only this field, e.g. 'password' or 'totp' (recommended)"),
+    field: z.string().min(1).max(200).optional().describe("The field to read, e.g. 'password' or 'api_key' (required unless the uri ends with /FIELD). Use pass_item_fields to see names."),
   },
   async ({ reason, vault, item, uri, field }) => {
     try {
       await ensureKey();
       const t = await resolveTarget({ vault, item, uri, field });
-      if (t.field && /(^|\.)totp$/i.test(t.field)) throw new Error("TOTP fields are only available as codes via pass_get_totp (the seed is never returned).");
+      // Whole-item reads would also print TOTP seeds and every other field: not offered.
+      if (!t.field) throw new Error("Specify a single 'field' (see pass_item_fields for the names).");
+      if (/(^|\.)totp(_uri)?$/i.test(t.field)) throw new Error("TOTP fields are only available as codes via pass_get_totp (the seed is never returned).");
       const approval = await gateSecret(t, reason);
       const args = ["item", "view", `--share-id=${t.share_id}`, `--item-id=${t.id}`];
-      if (t.field) args.push(`--field=${t.field}`);
+      args.push(`--field=${t.field}`);
       const out = await runPass(args, { agentReason: reason });
       approvedSecrets.add(approval);
       return ok(out);
@@ -393,7 +419,9 @@ tool(
     if (t.field) args.push(`--field=${t.field}`);
     const j = parseJson(await runPass(args, { agentReason: reason }));
     const tokens = {};
-    for (const [k, v] of Object.entries(j?.tokens ?? {})) if (/^\d{6,10}$/.test(String(v))) tokens[k] = String(v);
+    // pass-cli flattens the map ({"totp":"123456",…}); older builds may wrap it in "tokens".
+    const src = j && typeof j.tokens === "object" ? j.tokens : j ?? {};
+    for (const [k, v] of Object.entries(src)) if (/^\d{6,10}$/.test(String(v))) tokens[k] = String(v);
     if (!Object.keys(tokens).length) throw new Error("No TOTP code returned");
     approvedSecrets.add(approval);
     return ok(JSON.stringify({ item: t.title, vault: t.vault, tokens }, null, 2));
@@ -412,49 +440,59 @@ tool(
   async ({ reason, inFile, outFile, overwrite }) => {
     let tmpDir = null, tmpOut = null;
     try {
-      const src = path.resolve(inFile);
-      const dst = outFile ? path.resolve(outFile) : null;
-      if (dst && dst === src) throw new Error("'outFile' must differ from 'inFile'.");
+      const src = await realpath(path.resolve(inFile)).catch(() => { throw new Error("'inFile' not found"); });
       const st = await stat(src);
       if (!st.isFile()) throw new Error("'inFile' is not a regular file");
       if (st.size > MAX_TEMPLATE_BYTES) throw new Error(`Template larger than ${MAX_TEMPLATE_BYTES} bytes`);
       const content = await readFile(src, "utf8");
 
-      if (dst) {
-        const parent = await stat(path.dirname(dst)).catch(() => null);
-        if (!parent?.isDirectory()) throw new Error("Target directory does not exist");
+      // Target: parent directory resolved (so the dialog shows the real location); the file
+      // itself must be absent (or a regular file with overwrite=true) — never a symlink.
+      let dst = null;
+      if (outFile) {
+        const abs = path.resolve(outFile);
+        const parent = await realpath(path.dirname(abs)).catch(() => null);
+        if (!parent || !(await stat(parent)).isDirectory()) throw new Error("Target directory does not exist");
+        dst = path.join(parent, path.basename(abs));
+        if (dst === src) throw new Error("'outFile' must differ from 'inFile'.");
         const existing = await lstat(dst).catch(() => null);
         if (existing && !existing.isFile()) throw new Error("'outFile' exists and is not a regular file (symlinks are refused)");
         if (existing && !overwrite) throw new Error("'outFile' exists; pass overwrite=true to replace it");
       }
 
-      // Same pattern pass-cli uses; every reference is resolved and rewritten to canonical
-      // share/item IDs, so pass-cli renders exactly the secrets shown in the dialog.
-      const REF = /\{\{\s*(pass:\/\/[^}]+)\s*\}\}/g;
-      const uris = [...new Set([...content.matchAll(REF)].map((m) => m[1].trim()))];
+      // pass-cli's pattern is \{\{\s*(pass://[^}]+)\s*\}\} with Rust's Unicode \s, which also
+      // covers U+0085 (NEL) — JavaScript's \s does not. Every reference is resolved and rewritten
+      // to canonical share/item IDs, so pass-cli renders exactly the secrets shown in the dialog.
+      const REF = /\{\{[\s\u0085]*(pass:\/\/[^}]+)[\s\u0085]*\}\}/g;
+      const trimRef = (u) => u.replace(/^[\s\u0085]+|[\s\u0085]+$/g, "");
+      const uris = [...new Set([...content.matchAll(REF)].map((m) => trimRef(m[1])))];
       if (!uris.length) throw new Error("The template contains no {{ pass://… }} references");
-      if (uris.length > MAX_TEMPLATE_REFS) throw new Error(`Too many references (max ${MAX_TEMPLATE_REFS})`);
       await ensureKey();
       const canon = new Map(), secrets = new Map();
       for (const u of uris) {
         const r = parseRef(u);
         if (!r.field) throw new Error(`Reference without field: ${clean(u, 80)}`);
+        if (/(^|\.)totp(_uri)?$/i.test(r.field)) throw new Error("TOTP fields cannot be rendered into templates (use pass_get_totp).");
         const t = await resolveItem(r.vault, r.item);
-        canon.set(u, `pass://${encodeURIComponent(t.share_id)}/${encodeURIComponent(t.id)}/${encodeField(r.field)}${r.query ? "?" + r.query : ""}`);
-        secrets.set(`${t.share_id}/${t.id}/${r.field}`, `${clean(t.title, 40)} · ${clean(r.field, 30)} (${clean(t.vault, 30)})`);
+        canon.set(u, `pass://${encodeURIComponent(t.share_id)}/${encodeURIComponent(t.id)}/${encodeField(r.field)}`);
+        secrets.set(`${t.share_id}/${t.id}/${r.field.toLowerCase()}`, `${clean(t.title, 40)} · ${clean(r.field, 30)} (${clean(t.vault, 30)})`);
       }
-      const rewritten = content.replace(REF, (_m, u) => `{{ ${canon.get(u.trim())} }}`);
+      if (secrets.size > MAX_TEMPLATE_SECRETS) throw new Error(`Too many secrets in one template (max ${MAX_TEMPLATE_SECRETS}); split it up.`);
+      const rewritten = content.replace(REF, (_m, u) => `{{ ${canon.get(trimRef(u))} }}`);
+      // Anything left that pass-cli might still treat as a reference means our view differs from
+      // pass-cli's (unusual whitespace, odd nesting): refuse instead of rendering unseen secrets.
+      if (/\{\{[^}]*pass:\/\//i.test(rewritten.replace(REF, ""))) {
+        throw new Error("The template contains a pass:// reference in an unsupported form; write it as {{ pass://VAULT/ITEM/FIELD }}.");
+      }
 
       const digest = createHash("sha256").update(rewritten).digest("hex");
       const approval = JSON.stringify(["inject", digest, dst, Boolean(overwrite)]);
       if (!approvedSecrets.has(approval)) {
-        const names = [...secrets.values()];
-        const shown = names.slice(0, 8).join("\n  ") + (names.length > 8 ? `\n  … and ${names.length - 8} more` : "");
         await touchIdGate([
-          `AI agent requests ${names.length} Proton Pass secret(s) via template`,
+          `AI agent requests ${secrets.size} Proton Pass secret(s) via template`,
           `Template: ${clean(src, 90)}`,
           `Target: ${dst ? clean(dst, 90) + (overwrite ? " (replaces existing file)" : "") : "RETURNED INTO THE AI CONVERSATION"}`,
-          `Secrets:\n  ${shown}`,
+          `Secrets:\n  ${[...secrets.values()].join("\n  ")}`,
           `Agent's reason: ${clean(reason, 120)}`,
         ].join("\n"));
       }
@@ -471,7 +509,12 @@ tool(
       tmpOut = path.join(path.dirname(dst), `.${path.basename(dst)}.${randomBytes(6).toString("hex")}.tmp`);
       await runPass(["inject", "-i", tpl, "-o", tmpOut, "--file-mode", "0600"], { agentReason: reason });
       await chmod(tmpOut, 0o600);
-      await rename(tmpOut, dst); // atomic; replaces a path, never follows a symlink at dst
+      if (overwrite) {
+        await rename(tmpOut, dst); // atomic; replaces the path itself, never follows a symlink
+      } else {
+        await link(tmpOut, dst);   // fails with EEXIST if something appeared meanwhile
+        await unlink(tmpOut);
+      }
       tmpOut = null;
       approvedSecrets.add(approval);
       return ok(`Written ${secrets.size} secret reference(s) to ${dst} (mode 0600)`);

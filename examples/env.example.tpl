@@ -1,5 +1,5 @@
 # Example template for local project variables.
-# {{ pass://SHARE_ID/ITEM_ID[/FIELD] }} references a Proton Pass field.
+# A reference in double braces with pass://VAULT/ITEM/FIELD points to a Proton Pass field.
 # Render:  passx inject -i env.example.tpl -o .env      (terminal, 1x Touch ID)
 #     or   the MCP tool pass_inject (reason + one named Touch ID tap)
 #

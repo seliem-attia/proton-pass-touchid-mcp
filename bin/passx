@@ -7,6 +7,13 @@ set -euo pipefail
 BASE="${PASS_AGENT_HOME:-$HOME/.config/proton-pass-agent}"
 SERVICE="${PASS_AGENT_KEYCHAIN_SERVICE:-proton-pass-agent}"
 PASS_CLI="${PASS_CLI_BIN:-$(command -v pass-cli || echo /opt/homebrew/bin/pass-cli)}"
+# `pass-cli run` passes its whole environment — including the session key — to the child
+# command, which could then read every secret the agent token can access.
+if [ "${1:-}" = "run" ] && [ "${PASSX_ALLOW_RUN:-}" != "1" ]; then
+  echo "passx: 'run' would hand the session key to the child process. Use 'passx inject' instead," >&2
+  echo "       or set PASSX_ALLOW_RUN=1 if you trust that command completely." >&2
+  exit 64
+fi
 # The key is exported (not passed as an argument to env(1)), so it never shows up in `ps`.
 # Don't put secrets into passx arguments: they appear in the Touch ID dialog text.
 PROTON_PASS_ENCRYPTION_KEY="$("$BASE/pass-keychain" read "$SERVICE" encryption-key "pass-cli (terminal): $*")"

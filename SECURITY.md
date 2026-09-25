@@ -22,8 +22,9 @@ instead. You will get an answer within a few days.
 | One template approval reused for more secrets | The approval is bound to the SHA-256 of the canonicalized template and the target; the dialog lists every referenced secret; rendering uses a private copy |
 | Overwriting arbitrary files through `pass_inject` | Symlinks and non-regular files are refused; existing files need `overwrite: true`, which is shown in the dialog |
 | Option injection into `pass-cli` | `execFile` without a shell; values passed as `--flag=value`; `pass://` references validated |
-| Secret values in error messages or listings | Errors carry sanitized stderr only; listings are projected onto a field whitelist |
-| TOTP seed exfiltration | Only numeric codes are returned (`pass_get_totp`); seed reads are refused |
+| Secret values in error messages or listings | Errors never contain stdout, and stderr only when it matches a value-free message class; listings are projected onto a field whitelist |
+| TOTP seed exfiltration | Only numeric codes are returned (`pass_get_totp`); TOTP fields, whole-item reads and `?totp=uri` references are refused |
+| Template references hidden from the dialog (e.g. with U+0085 whitespace that only pass-cli's regex treats as space) | The parser mirrors pass-cli's Unicode whitespace, and any leftover `{{ … pass:// … }}` after canonicalization rejects the template; max 10 secrets so all are listed |
 | Inherited credentials / env overrides from the MCP client | Child processes get a minimal environment |
 | Stacked or racing dialogs | Tool calls are serialized; every subprocess and dialog has a timeout |
 | An agent reading vaults it should not see | The agent token is scoped to granted vaults; optional `PASS_AGENT_ALLOWED_VAULTS` |
@@ -40,7 +41,10 @@ instead. You will get an answer within a few days.
 6. **Approval is per session.** An approved secret can be read again by the same MCP process without a new prompt until it exits. Restart the MCP server to reset.
 7. **`pass_item_fields` reads the item without a per-secret tap.** Values are discarded inside the server and never returned. The read is logged by Proton.
 8. **Environment variables.** The key is handed to `pass-cli` through `PROTON_PASS_ENCRYPTION_KEY`, as required by the env key provider. Processes of the same user may be able to inspect a child's environment.
-9. **Ad-hoc code signature.** The helper is signed ad-hoc. Build it yourself from source; do not use binaries from untrusted places.
+9. **Loose field matching inside an item.** pass-cli matches field names case-insensitively and may fall back to a section-qualified field (`api_key` → `Prod.api_key`). This stays within the item shown in the dialog.
+10. **Item-level shares are not reachable.** Items granted to the agent one by one (not via a vault) do not appear in `vault list`, so this server cannot resolve them.
+11. **`passx run`** hands the session key to the child process (a pass-cli design). `passx` blocks it unless `PASSX_ALLOW_RUN=1`.
+12. **Ad-hoc code signature.** The helper is signed ad-hoc. Build it yourself from source; do not use binaries from untrusted places.
 
 ## Hardening checklist
 

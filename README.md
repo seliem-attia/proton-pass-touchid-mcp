@@ -45,7 +45,7 @@ This server takes a middle path. Proton Pass stays the single source of truth, t
 - 🔐 **Touch ID per secret.** Each distinct item/field needs its own named biometric approval. Denied or failed reads are never remembered as approved.
 - 🎯 **Spoof-resistant dialog.** The server resolves the target from metadata first and shows the real title and vault. Agent-supplied text is stripped of control, bidi and zero-width characters and capped in length.
 - 📄 **Safe `.env` rendering.** `pass_inject` lists *every* referenced secret in the dialog, binds the approval to the exact template content, renders from a private copy, and writes atomically with mode `0600`. Symlinks are refused, and existing files are only replaced on request.
-- ⏱️ **TOTP codes, never seeds.** `pass_get_totp` returns only numeric codes. Reading the TOTP seed through `pass_get_item` is refused.
+- ⏱️ **TOTP codes, never seeds.** `pass_get_totp` returns only numeric codes. TOTP fields, whole-item reads and `?totp=uri` references are refused everywhere else.
 - 🧾 **Mandatory reason + Proton audit log.** Every read carries a `reason`, shown in the dialog and logged server-side by Proton (`pass_audit`).
 - 🪪 **Scoped agent identity.** The agent uses its own Proton Pass agent token, limited to the vaults you grant. An optional local vault allowlist adds a second layer.
 - 🧠 **Key in RAM only.** The session key is read from the keychain once per process and never written to disk.
@@ -145,9 +145,9 @@ Any client that supports stdio MCP servers works. The command is `node`, and the
 | `pass_list_vaults` | session unlock | no | Vaults the agent can access |
 | `pass_list_items {vault?}` | session unlock | no | Titles, IDs, type, state (whitelisted fields only) |
 | `pass_item_fields {reason, vault?, item?, uri?}` | session unlock | no | Field names only; values are discarded |
-| `pass_get_item {reason, vault?, item?, uri?, field?}` | **one named tap per secret** | yes | Read one field (recommended) or the whole item |
+| `pass_get_item {reason, field, vault?, item?, uri?}` | **one named tap per secret** | yes | Read exactly one field (whole-item reads are not offered) |
 | `pass_get_totp {reason, vault?, item?, uri?, field?}` | **one named tap per item** | code only | Current TOTP code(s), never the seed |
-| `pass_inject {reason, inFile, outFile?, overwrite?}` | **one tap per render, lists all secrets** | only without `outFile` | Render a `{{ pass://… }}` template into a `0600` file |
+| `pass_inject {reason, inFile, outFile?, overwrite?}` | **one tap per render, lists all secrets** | only without `outFile` | Render a `{{ pass://… }}` template (max 10 secrets) into a `0600` file |
 | `pass_audit {limit?}` | session unlock | no | Proton's audit log for this agent |
 
 Items can be addressed by title (`item` + optional `vault`) or by reference (`uri: "pass://VAULT/ITEM[/FIELD]"`, names or IDs). Ambiguous titles are refused with a list of candidates.
@@ -165,6 +165,8 @@ PROTON_PASS_AGENT_REASON="deploy" passx item view --vault-name "AI Secrets" --it
 passx inject -i examples/env.example.tpl -o .env
 ```
 
+`passx run` is blocked by default: `pass-cli run` passes the session key to the child process. Set `PASSX_ALLOW_RUN=1` only for commands you trust completely.
+
 ## Configuration
 
 All settings are optional environment variables, set in the MCP client's `env` block:
@@ -178,7 +180,7 @@ All settings are optional environment variables, set in the MCP client's `env` b
 | `PASS_AGENT_SESSION_DIR` | `$PASS_AGENT_HOME/session` | Encrypted `pass-cli` session |
 | `PASS_KEYCHAIN_BIN` | `$PASS_AGENT_HOME/pass-keychain` | Path of the Swift helper |
 | `PASS_AGENT_KEYCHAIN_SERVICE` | `proton-pass-agent` | Keychain service name |
-| `PASS_CLI_BIN` | `/opt/homebrew/bin/pass-cli`, `/usr/local/bin/pass-cli`, or `PATH` | Path of `pass-cli` |
+| `PASS_CLI_BIN` | `/opt/homebrew/bin/pass-cli`, `/usr/local/bin/pass-cli`, `~/.local/bin/pass-cli`, or `PATH` | Path of `pass-cli` |
 
 ### Template syntax
 
@@ -187,7 +189,8 @@ API_KEY={{ pass://AI Secrets/Stripe/api_key }}
 DB_URL={{ pass://SHARE_ID/ITEM_ID/connection_string }}
 ```
 
-- Field names with special characters must be **URL-encoded** (`API Key` → `API%20Key`). `pass_item_fields` shows the exact names.
+- Field names with special characters must be **URL-encoded** (`API Key` → `API%20Key`). `pass_item_fields` shows the exact names, including section fields such as `Prod.token`.
+- Up to 10 distinct secrets per template, so the dialog can list all of them. Query strings (`?totp=…`) and TOTP fields are not supported in templates.
 - Share and item IDs can differ between the MCP session and your own user session in the terminal. In the terminal, prefer name-based selectors.
 
 ## Security model

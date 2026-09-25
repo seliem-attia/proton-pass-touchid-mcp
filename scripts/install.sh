@@ -80,8 +80,8 @@ cat <<EOF
 
 Done. Add the server to your MCP client:
 
-  Claude Code:     claude mcp add --scope user proton-pass -- node "$TARGET/mcp/index.mjs"
-  Claude Desktop:  see examples/claude_desktop_config.json
+  Claude Code:     claude mcp add --scope user proton-pass -e PASS_CLI_BIN="$PASS_CLI" -- node "$TARGET/mcp/index.mjs"
+  Claude Desktop:  see examples/claude_desktop_config.json and set "PASS_CLI_BIN": "$PASS_CLI"
 
 Optional terminal wrapper:  ln -s "$TARGET/passx" /opt/homebrew/bin/passx
 Smoke test (lists titles only):  node "$TARGET/mcp/smoke-test.mjs"
