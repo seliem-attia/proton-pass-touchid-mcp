@@ -249,7 +249,7 @@ const zName = z.string().min(1).max(200);
 
 // ---- Server ------------------------------------------------------------------
 const server = new McpServer(
-  { name: "proton-pass-touchid-mcp", version: "2.2.0" },
+  { name: "proton-pass-touchid-mcp", version: "2.2.1" },
   {
     instructions:
       "Proton Pass secrets behind a human Touch ID approval. Each secret read shows the user a dialog with the item, " +
@@ -290,7 +290,7 @@ tool(
     await ensureKey();
     const version = (await exec(PASS_CLI, ["--version"], { timeout: CLI_TIMEOUT_MS })).stdout.trim() || "unknown";
     const info = await runPass(["info"]);
-    return ok(`${info}\n\npass-cli: ${version}\nMCP server: proton-pass-touchid-mcp 2.2.0` +
+    return ok(`${info}\n\npass-cli: ${version}\nMCP server: proton-pass-touchid-mcp 2.2.1` +
       (ALLOWED_VAULTS.length ? `\nVault allowlist: ${ALLOWED_VAULTS.join(", ")}` : ""));
   }
 );

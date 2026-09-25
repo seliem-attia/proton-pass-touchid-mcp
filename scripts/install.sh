@@ -30,12 +30,36 @@ cp "$REPO/bin/passx" "$TARGET/passx"
 chmod 755 "$TARGET/passx"
 (cd "$TARGET/mcp" && npm ci --omit=dev --no-audit --no-fund --silent)
 
-say "Building Touch ID keychain helper"
-swiftc -O "$REPO/helper/pass-keychain.swift" -o "$TARGET/pass-keychain"
-codesign --force --sign - "$TARGET/pass-keychain" >/dev/null 2>&1 || fail "codesign of the helper failed"
-chmod 755 "$TARGET/pass-keychain"
-
+# The keychain entries trust the helper by its code signature. An ad-hoc signature changes
+# with EVERY build (swiftc output is not reproducible), and macOS then asks for the login
+# password. So the helper is only rebuilt when its source changed, and existing entries are
+# then re-bound to the new build (one Touch ID + one keychain password prompt per entry, once).
 has_item() { security find-generic-password -s "$SERVICE" -a "$1" >/dev/null 2>&1; }
+SRC_HASH="$( { cat "$REPO/helper/pass-keychain.swift"; swiftc --version 2>/dev/null; } | shasum -a 256 | cut -d' ' -f1)"
+HASH_FILE="$TARGET/.pass-keychain.sha256"
+REBUILT=0
+if [ -x "$TARGET/pass-keychain" ] && [ "$(cat "$HASH_FILE" 2>/dev/null)" = "$SRC_HASH" ]; then
+  say "Touch ID keychain helper unchanged — keeping the existing build"
+else
+  say "Building Touch ID keychain helper"
+  swiftc -O "$REPO/helper/pass-keychain.swift" -o "$TARGET/pass-keychain.new"
+  codesign --force --sign - "$TARGET/pass-keychain.new" >/dev/null 2>&1 || fail "codesign of the helper failed"
+  chmod 755 "$TARGET/pass-keychain.new"
+  mv -f "$TARGET/pass-keychain.new" "$TARGET/pass-keychain"
+  echo "$SRC_HASH" > "$HASH_FILE"   # record right away, so an aborted re-bind never triggers another rebuild
+  REBUILT=1
+fi
+if [ "$REBUILT" = 1 ]; then
+  for acct in encryption-key pat; do
+    if has_item "$acct"; then
+      say "Re-binding keychain entry '$acct' to the new helper build"
+      echo "    macOS asks for your login password once for this entry (then Touch ID only)."
+      "$TARGET/pass-keychain" rebind "$SERVICE" "$acct" "Proton Pass MCP setup: re-authorize helper for '$acct'" \
+        || fail "re-binding '$acct' failed; the entry is unchanged (or kept as '$acct.rebind'). Retry with:
+  \"$TARGET/pass-keychain\" rebind $SERVICE $acct"
+    fi
+  done
+fi
 
 if has_item encryption-key; then
   say "Session encryption key already in keychain ($SERVICE/encryption-key) — keeping it"

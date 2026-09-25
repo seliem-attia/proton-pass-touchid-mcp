@@ -230,6 +230,7 @@ Yes: `pass-cli agent access revoke "Claude Code" --vault "…"`, or delete the a
 | `Ambiguous: N items match` | Several items share the title. Add `vault`, or use the `uri` from the error message. |
 | `'outFile' exists; pass overwrite=true` | Intentional. Let the agent retry with `overwrite: true`; the dialog then says the file is replaced. |
 | `Invalid reference format` in `pass_inject` | URL-encode field names with special characters. |
+| macOS asks for your **login password** instead of only Touch ID | The keychain entries trust the helper by its code signature, and an ad-hoc signature changes with every rebuild. Run `~/.config/proton-pass-agent/pass-keychain rebind proton-pass-agent encryption-key` and `… rebind proton-pass-agent pat` once (Touch ID + password), then it is Touch ID only again. `install.sh` does this automatically and only rebuilds the helper when its source changed. |
 | No Touch ID dialog appears | Rebuild the helper: `swiftc -O helper/pass-keychain.swift -o ~/.config/proton-pass-agent/pass-keychain && codesign --force --sign - ~/.config/proton-pass-agent/pass-keychain` |
 | New MCP tools not visible | Restart Claude Desktop, or reconnect the server in your client. |
 

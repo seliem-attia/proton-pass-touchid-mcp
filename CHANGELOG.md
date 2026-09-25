@@ -1,5 +1,9 @@
 # Changelog
 
+## 2.2.1 — 2026-09-25
+
+- **Fix: login-password prompts after an update.** The keychain entries trust the helper by its ad-hoc code signature, which changes with every build. `install.sh` now rebuilds the helper only when its source changed. After a rebuild it re-binds the existing entries to the new build (new `pass-keychain rebind`, safe order: copy → delete → re-add), so later reads need Touch ID only.
+
 ## 2.2.0 — 2026-09-25 (first public release)
 
 Security hardening after an internal review and a comparison with other Proton Pass MCP servers:

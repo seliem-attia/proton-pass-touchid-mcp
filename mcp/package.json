@@ -1,6 +1,6 @@
 {
   "name": "proton-pass-touchid-mcp",
-  "version": "2.2.0",
+  "version": "2.2.1",
   "private": true,
   "type": "module",
   "description": "MCP server for Proton Pass with Touch ID approval per secret: gives Claude, Cursor and other AI agents audited, biometric-gated access to pass-cli on macOS",
